@@ -8,7 +8,7 @@
 
 ## 资源占用
 
-> SSHcat 仅占用 **0.7% CPU** 和 **140 MB 内存**，低于浏览器和系统资源管理器。
+> SSHcat 仅占用 **0.7% CPU** 和 **140 MB 内存**，而同类工具 FinalShell (Java) 占用 **1.8% CPU** 和 **378 MB 内存**，资源消耗不到其 1/3。
 
 ![资源占用对比](screenshots/resource_usage.png)
 
