@@ -1,4 +1,4 @@
-"""Main application window — connection panel, directory browser, system status, terminal."""
+"""Main application window — multi-tab terminal, SFTP, editor, tunnels, session groups."""
 
 import json
 import os
@@ -13,20 +13,20 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import paramiko
 
 from .theme import DRACULA
-from .ssh_manager import SshManager, SshExecHelper
-from .threads import SshReaderThread, PanelRefreshThread
-from .terminal_widget import TerminalWidget
+from .session import Session
+from .sftp_manager import SftpThread
+from .editor_widget import RemoteEditorWidget
+from .tunnel import TunnelManager, TunnelEntry
 from .crypto import encrypt_password, decrypt_password
 
 
-# ====================== 连接历史 ======================
+# ====================== 连接历史 + 会话分组 ======================
 
 _HISTORY_PATH = Path.home() / ".sshcat_history.json"
-_MAX_HISTORY = 20
+_MAX_HISTORY = 50
 
 
 def load_history() -> list:
-    """加载连接历史记录"""
     if not _HISTORY_PATH.exists():
         return []
     try:
@@ -37,22 +37,33 @@ def load_history() -> list:
 
 
 def save_history(entries: list):
-    """保存连接历史记录"""
     try:
         _HISTORY_PATH.write_text(json.dumps(entries[:_MAX_HISTORY], ensure_ascii=False, indent=2), "utf-8")
     except Exception:
         pass
 
 
-def add_history_entry(host, port, username, password=""):
-    """添加一条连接记录（去重，最新在前，密码加密存储）"""
+def add_history_entry(host, port, username, password="", group="默认"):
     entries = load_history()
     entry = {"host": host, "port": int(port), "username": username,
-             "password_enc": encrypt_password(password)}
-    # 去重
+             "password_enc": encrypt_password(password), "group": group}
     entries = [e for e in entries if not (e.get("host") == host and e.get("port") == int(port) and e.get("username") == username)]
     entries.insert(0, entry)
     save_history(entries)
+
+
+# ====================== 菜单样式 ======================
+
+_MENU_STYLE = f"""
+    QMenu {{
+        background-color: {DRACULA['bg_lighter']};
+        color: {DRACULA['fg']};
+        border: 1px solid {DRACULA['selection']};
+        border-radius: 4px; padding: 4px;
+    }}
+    QMenu::item {{ padding: 6px 20px; border-radius: 3px; }}
+    QMenu::item:selected {{ background-color: {DRACULA['selection']}; }}
+"""
 
 
 # ====================== 主窗口 ======================
@@ -64,24 +75,22 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("SSHcat")
         self.resize(1200, 700)
-        # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QtGui.QIcon(icon_path))
 
-        self._ssh = SshManager()
-        self._exec = SshExecHelper(self._ssh)  # 复用同一连接的独立通道
-        self._reader: Optional[SshReaderThread] = None
-        self._panel_thread: Optional[PanelRefreshThread] = None
-        self._channel: Optional[paramiko.Channel] = None
-        self._reconnect_info = None  # 用于断线重连
+        self._sessions: dict[int, Session] = {}
+        self._tunnel_mgr = TunnelManager(self)
 
         self._build_ui()
         self._setup_styles()
         self._setup_dark_titlebar()
-        self._load_history_to_combo()
-
+        self._load_session_tree()
         self.log_signal.connect(self._append_log)
+
+    def _current_session(self) -> Optional[Session]:
+        idx = self.tab_widget.currentIndex()
+        return self._sessions.get(idx)
 
     def log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
@@ -89,836 +98,667 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _append_log(self, msg: str):
         self.log_edit.append(msg)
-        sb = self.log_edit.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.log_edit.verticalScrollBar().setValue(self.log_edit.verticalScrollBar().maximum())
 
-    # -------------------- UI 构建 --------------------
+    # ==================== UI ====================
 
     def _build_ui(self):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        root_layout = QtWidgets.QVBoxLayout(central)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        sp_main = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        root.addWidget(sp_main)
 
-        splitter_main = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        root_layout.addWidget(splitter_main)
+        top = QtWidgets.QWidget()
+        top_lay = QtWidgets.QHBoxLayout(top)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        self.splitter_lr = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        top_lay.addWidget(self.splitter_lr)
+        sp_main.addWidget(top)
 
-        # 上半: 左面板 + 终端
-        top_widget = QtWidgets.QWidget()
-        top_layout = QtWidgets.QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-
-        splitter_lr = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        top_layout.addWidget(splitter_lr)
-        splitter_main.addWidget(top_widget)
-
-        # ---- 左侧面板 ----
+        # 左面板
         left_scroll = QtWidgets.QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        left_container = QtWidgets.QWidget()
-        left_scroll.setWidget(left_container)
-        splitter_lr.addWidget(left_scroll)
+        lc = QtWidgets.QWidget()
+        left_scroll.setWidget(lc)
+        self.splitter_lr.addWidget(left_scroll)
+        ll = QtWidgets.QVBoxLayout(lc)
+        ll.setContentsMargins(10, 10, 10, 10)
 
-        left_layout = QtWidgets.QVBoxLayout(left_container)
-        left_layout.setContentsMargins(10, 10, 10, 10)
+        self._build_conn(ll)
+        self._build_tree(ll)
+        self._build_dir(ll)
+        self._build_sftp(ll)
+        self._build_sys(ll)
+        self._build_tunnel(ll)
+        ll.addStretch(1)
 
-        # 连接信息
-        conn_group = QtWidgets.QGroupBox("连接信息")
-        conn_layout = QtWidgets.QGridLayout(conn_group)
-
-        row = 0
-        conn_layout.addWidget(QtWidgets.QLabel("服务器 IP"), row, 0)
-        self.ip_edit = QtWidgets.QLineEdit()
-        self.ip_edit.setPlaceholderText("例: 192.168.1.100")
-        conn_layout.addWidget(self.ip_edit, row, 1)
-
-        row += 1
-        conn_layout.addWidget(QtWidgets.QLabel("端口"), row, 0)
-        self.port_edit = QtWidgets.QLineEdit("22")
-        conn_layout.addWidget(self.port_edit, row, 1)
-
-        row += 1
-        conn_layout.addWidget(QtWidgets.QLabel("用户名"), row, 0)
-        self.user_edit = QtWidgets.QLineEdit("root")
-        conn_layout.addWidget(self.user_edit, row, 1)
-
-        row += 1
-        conn_layout.addWidget(QtWidgets.QLabel("密码"), row, 0)
-        self.pass_edit = QtWidgets.QLineEdit()
-        self.pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        conn_layout.addWidget(self.pass_edit, row, 1)
-
-        row += 1
-        conn_layout.addWidget(QtWidgets.QLabel("密钥文件"), row, 0)
-        key_row = QtWidgets.QHBoxLayout()
-        self.key_edit = QtWidgets.QLineEdit()
-        self.key_edit.setPlaceholderText("可选，如 ~/.ssh/id_rsa")
-        btn_browse_key = QtWidgets.QPushButton("浏览")
-        btn_browse_key.setFixedWidth(50)
-        btn_browse_key.clicked.connect(self._browse_key_file)
-        key_row.addWidget(self.key_edit)
-        key_row.addWidget(btn_browse_key)
-        conn_layout.addLayout(key_row, row, 1)
-
-        row += 1
-        conn_layout.addWidget(QtWidgets.QLabel("历史"), row, 0)
-        self.history_combo = QtWidgets.QComboBox()
-        self.history_combo.addItem("— 选择历史连接 —")
-        self.history_combo.currentIndexChanged.connect(self._on_history_selected)
-        conn_layout.addWidget(self.history_combo, row, 1)
-
-        row += 1
-        btn_row = QtWidgets.QHBoxLayout()
-        self.btn_connect = QtWidgets.QPushButton("连接服务器")
-        self.btn_disconnect = QtWidgets.QPushButton("断开连接")
-        self.btn_disconnect.setEnabled(False)
-        self.btn_connect.clicked.connect(self.on_connect)
-        self.btn_disconnect.clicked.connect(self.on_disconnect)
-        btn_row.addWidget(self.btn_connect)
-        btn_row.addWidget(self.btn_disconnect)
-        conn_layout.addLayout(btn_row, row, 0, 1, 2)
-
-        # 状态指示
-        row += 1
-        status_row = QtWidgets.QHBoxLayout()
-        self.status_dot = QtWidgets.QLabel()
-        self.status_dot.setFixedSize(12, 12)
-        self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
-        self.status_label = QtWidgets.QLabel("未连接")
-        status_row.addWidget(self.status_dot)
-        status_row.addWidget(self.status_label)
-        status_row.addStretch(1)
-        conn_layout.addLayout(status_row, row, 0, 1, 2)
-
-        left_layout.addWidget(conn_group)
-
-        # 目录面板
-        dir_group = QtWidgets.QGroupBox("当前目录")
-        dir_layout = QtWidgets.QVBoxLayout(dir_group)
-
-        # 路径行：返回按钮 + 路径标签
-        dir_header = QtWidgets.QHBoxLayout()
-        self.btn_back = QtWidgets.QPushButton()
-        self.btn_back.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack))
-        self.btn_back.setFixedSize(28, 28)
-        self.btn_back.setToolTip("返回上级目录")
-        self.btn_back.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {DRACULA['comment']};
-                color: {DRACULA['fg']};
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 14px;
+        # 右面板：多标签终端
+        right = QtWidgets.QWidget()
+        rl = QtWidgets.QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        d = DRACULA
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)
+        self.tab_widget.tabCloseRequested.connect(self._on_tab_close)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.tab_widget.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; background-color: {d['bg']}; }}
+            QTabBar::tab {{
+                background-color: {d['bg_darker']}; color: {d['comment']};
+                padding: 6px 16px; border: 1px solid {d['selection']};
+                border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px;
+                margin-right: 2px;
             }}
-            QPushButton:hover {{
-                background-color: #7082b6;
+            QTabBar::tab:selected {{
+                background-color: {d['bg']}; color: {d['fg']};
+                border-bottom: 2px solid {d['purple']};
             }}
-            QPushButton:pressed {{
-                background-color: {DRACULA['selection']};
-            }}
+            QTabBar::tab:hover {{ background-color: {d['bg_lighter']}; }}
         """)
-        self.btn_back.clicked.connect(self._on_back_clicked)
-        dir_header.addWidget(self.btn_back)
+        rl.addWidget(self.tab_widget)
+        self.splitter_lr.addWidget(right)
+        self.splitter_lr.setStretchFactor(0, 1)
+        self.splitter_lr.setStretchFactor(1, 3)
+        self.splitter_lr.setSizes([300, 900])
 
-        self.dir_path_label = QtWidgets.QLabel("—")
-        self.dir_path_label.setStyleSheet(f"color:{DRACULA['yellow']};font-weight:bold;")
-        self.dir_path_label.setWordWrap(True)
-        dir_header.addWidget(self.dir_path_label, 1)
-        dir_layout.addLayout(dir_header)
-
-        self.file_list = QtWidgets.QListWidget()
-        self.file_list.setMaximumHeight(200)
-        self.file_list.setFont(QtGui.QFont("Consolas", 9))
-        self.file_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {DRACULA['bg_darker']};
-                border: 1px solid {DRACULA['selection']};
-                border-radius: 4px;
-            }}
-            QListWidget::item {{
-                padding: 2px 4px;
-            }}
-            QListWidget::item:hover {{
-                background-color: {DRACULA['selection']};
-            }}
-        """)
-        self.file_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.file_list.customContextMenuRequested.connect(self._on_file_context_menu)
-        self.file_list.itemDoubleClicked.connect(self._on_file_double_clicked)
-        dir_layout.addWidget(self.file_list)
-
-        left_layout.addWidget(dir_group)
-
-        # 系统状态面板 - 进度条
-        sys_group = QtWidgets.QGroupBox("系统状态")
-        sys_layout = QtWidgets.QVBoxLayout(sys_group)
-        sys_layout.setSpacing(8)
-
-        bar_style = f"""
-            QProgressBar {{
-                background-color: {DRACULA['bg_darker']};
-                border: 1px solid {DRACULA['selection']};
-                border-radius: 4px;
-                height: 18px;
-                text-align: center;
-                color: {DRACULA['fg']};
-                font-size: 9pt;
-            }}
-            QProgressBar::chunk {{
-                border-radius: 3px;
-            }}
-        """
-
-        # CPU
-        sys_layout.addWidget(QtWidgets.QLabel("CPU 占用"))
-        self.cpu_bar = QtWidgets.QProgressBar()
-        self.cpu_bar.setRange(0, 100)
-        self.cpu_bar.setValue(0)
-        self.cpu_bar.setFormat("%v%")
-        self.cpu_bar.setStyleSheet(bar_style + f"""
-            QProgressBar::chunk {{ background-color: {DRACULA['cyan']}; border-radius: 3px; }}
-        """)
-        sys_layout.addWidget(self.cpu_bar)
-
-        # Memory
-        sys_layout.addWidget(QtWidgets.QLabel("内存占用"))
-        self.mem_bar = QtWidgets.QProgressBar()
-        self.mem_bar.setRange(0, 100)
-        self.mem_bar.setValue(0)
-        self.mem_bar.setFormat("%v%")
-        self.mem_bar.setStyleSheet(bar_style + f"""
-            QProgressBar::chunk {{ background-color: {DRACULA['green']}; border-radius: 3px; }}
-        """)
-        sys_layout.addWidget(self.mem_bar)
-
-        # Disk
-        sys_layout.addWidget(QtWidgets.QLabel("磁盘占用"))
-        self.disk_bar = QtWidgets.QProgressBar()
-        self.disk_bar.setRange(0, 100)
-        self.disk_bar.setValue(0)
-        self.disk_bar.setFormat("%v%")
-        self.disk_bar.setStyleSheet(bar_style + f"""
-            QProgressBar::chunk {{ background-color: {DRACULA['orange']}; border-radius: 3px; }}
-        """)
-        sys_layout.addWidget(self.disk_bar)
-
-        # Uptime
-        self.uptime_label = QtWidgets.QLabel("运行时间: —")
-        self.uptime_label.setStyleSheet(f"color:{DRACULA['comment']};font-size:9pt;")
-        self.uptime_label.setWordWrap(True)
-        sys_layout.addWidget(self.uptime_label)
-
-        left_layout.addWidget(sys_group)
-        left_layout.addStretch(1)
-
-        # ---- 右侧终端 ----
-        right_container = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right_container)
-        right_layout.setContentsMargins(2, 2, 2, 2)
-
-        self.terminal = TerminalWidget()
-        right_layout.addWidget(self.terminal)
-
-        splitter_lr.addWidget(right_container)
-        splitter_lr.setStretchFactor(0, 1)   # 左面板 比例 1
-        splitter_lr.setStretchFactor(1, 3)   # 终端 比例 3
-        splitter_lr.setSizes([300, 900])
-
-        # 下半: 日志
         self.log_edit = QtWidgets.QTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setMaximumHeight(120)
         self.log_edit.setFont(QtGui.QFont("Consolas", 9))
-        splitter_main.addWidget(self.log_edit)
-        splitter_main.setStretchFactor(0, 5)
-        splitter_main.setStretchFactor(1, 1)
+        sp_main.addWidget(self.log_edit)
+        sp_main.setStretchFactor(0, 5)
+        sp_main.setStretchFactor(1, 1)
 
-    # -------------------- 样式 --------------------
+    def _build_conn(self, pl):
+        g = QtWidgets.QGroupBox("连接信息")
+        gl = QtWidgets.QGridLayout(g)
+        r = 0
+        gl.addWidget(QtWidgets.QLabel("服务器 IP"), r, 0)
+        self.ip_edit = QtWidgets.QLineEdit(); self.ip_edit.setPlaceholderText("例: 192.168.1.100")
+        gl.addWidget(self.ip_edit, r, 1)
+        r += 1; gl.addWidget(QtWidgets.QLabel("端口"), r, 0)
+        self.port_edit = QtWidgets.QLineEdit("22"); gl.addWidget(self.port_edit, r, 1)
+        r += 1; gl.addWidget(QtWidgets.QLabel("用户名"), r, 0)
+        self.user_edit = QtWidgets.QLineEdit("root"); gl.addWidget(self.user_edit, r, 1)
+        r += 1; gl.addWidget(QtWidgets.QLabel("密码"), r, 0)
+        self.pass_edit = QtWidgets.QLineEdit(); self.pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        gl.addWidget(self.pass_edit, r, 1)
+        r += 1; gl.addWidget(QtWidgets.QLabel("密钥文件"), r, 0)
+        kr = QtWidgets.QHBoxLayout()
+        self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("可选")
+        bk = QtWidgets.QPushButton("浏览"); bk.setFixedWidth(50); bk.clicked.connect(self._browse_key)
+        kr.addWidget(self.key_edit); kr.addWidget(bk)
+        gl.addLayout(kr, r, 1)
+        r += 1; br = QtWidgets.QHBoxLayout()
+        self.btn_connect = QtWidgets.QPushButton("连接 (新标签)")
+        self.btn_disconnect = QtWidgets.QPushButton("断开当前"); self.btn_disconnect.setEnabled(False)
+        self.btn_connect.clicked.connect(self.on_connect)
+        self.btn_disconnect.clicked.connect(self.on_disconnect)
+        br.addWidget(self.btn_connect); br.addWidget(self.btn_disconnect)
+        gl.addLayout(br, r, 0, 1, 2)
+        r += 1; sr = QtWidgets.QHBoxLayout()
+        self.status_dot = QtWidgets.QLabel(); self.status_dot.setFixedSize(12, 12)
+        self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
+        self.status_label = QtWidgets.QLabel("未连接")
+        sr.addWidget(self.status_dot); sr.addWidget(self.status_label); sr.addStretch(1)
+        gl.addLayout(sr, r, 0, 1, 2)
+        pl.addWidget(g)
+
+    def _build_tree(self, pl):
+        g = QtWidgets.QGroupBox("会话管理")
+        gl = QtWidgets.QVBoxLayout(g)
+        self.session_tree = QtWidgets.QTreeWidget()
+        self.session_tree.setHeaderLabels(["连接"])
+        self.session_tree.setMaximumHeight(160)
+        self.session_tree.setFont(QtGui.QFont("Consolas", 9))
+        self.session_tree.setStyleSheet(f"""
+            QTreeWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}
+            QTreeWidget::item {{ padding: 2px 4px; }}
+            QTreeWidget::item:hover {{ background-color: {DRACULA['selection']}; }}
+            QTreeWidget::item:selected {{ background-color: {DRACULA['purple']}; color: {DRACULA['fg']}; }}
+        """)
+        self.session_tree.itemDoubleClicked.connect(self._on_tree_dblclick)
+        gl.addWidget(self.session_tree)
+        br = QtWidgets.QHBoxLayout()
+        ba = QtWidgets.QPushButton("新建分组"); ba.clicked.connect(self._add_group)
+        bd = QtWidgets.QPushButton("删除"); bd.clicked.connect(self._del_entry)
+        br.addWidget(ba); br.addWidget(bd)
+        gl.addLayout(br)
+        pl.addWidget(g)
+
+    def _build_dir(self, pl):
+        g = QtWidgets.QGroupBox("当前目录")
+        gl = QtWidgets.QVBoxLayout(g)
+        dh = QtWidgets.QHBoxLayout()
+        self.btn_back = QtWidgets.QPushButton()
+        self.btn_back.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack))
+        self.btn_back.setFixedSize(28, 28); self.btn_back.clicked.connect(self._on_back)
+        dh.addWidget(self.btn_back)
+        self.dir_path_label = QtWidgets.QLabel("—")
+        self.dir_path_label.setStyleSheet(f"color:{DRACULA['yellow']};font-weight:bold;")
+        self.dir_path_label.setWordWrap(True)
+        dh.addWidget(self.dir_path_label, 1)
+        gl.addLayout(dh)
+        self.file_list = QtWidgets.QListWidget()
+        self.file_list.setMaximumHeight(180)
+        self.file_list.setFont(QtGui.QFont("Consolas", 9))
+        self.file_list.setStyleSheet(f"""
+            QListWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}
+            QListWidget::item {{ padding: 2px 4px; }}
+            QListWidget::item:hover {{ background-color: {DRACULA['selection']}; }}
+        """)
+        self.file_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._on_file_ctx)
+        self.file_list.itemDoubleClicked.connect(self._on_file_dblclick)
+        gl.addWidget(self.file_list)
+        pl.addWidget(g)
+
+    def _build_sftp(self, pl):
+        g = QtWidgets.QGroupBox("SFTP 文件传输")
+        gl = QtWidgets.QVBoxLayout(g)
+        br = QtWidgets.QHBoxLayout()
+        self.btn_upload = QtWidgets.QPushButton("上传文件"); self.btn_upload.clicked.connect(self._sftp_upload)
+        self.btn_download = QtWidgets.QPushButton("下载文件"); self.btn_download.clicked.connect(self._sftp_download)
+        br.addWidget(self.btn_upload); br.addWidget(self.btn_download)
+        gl.addLayout(br)
+        self.sftp_progress = QtWidgets.QProgressBar(); self.sftp_progress.setRange(0, 100)
+        self.sftp_progress.setValue(0); self.sftp_progress.setVisible(False)
+        gl.addWidget(self.sftp_progress)
+        self.sftp_status = QtWidgets.QLabel("")
+        self.sftp_status.setStyleSheet(f"color:{DRACULA['comment']};font-size:9pt;")
+        gl.addWidget(self.sftp_status)
+        pl.addWidget(g)
+
+    def _build_sys(self, pl):
+        g = QtWidgets.QGroupBox("系统状态")
+        gl = QtWidgets.QVBoxLayout(g); gl.setSpacing(8)
+        bs = f"""QProgressBar {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']};
+            border-radius: 4px; height: 18px; text-align: center; color: {DRACULA['fg']}; font-size: 9pt; }}
+            QProgressBar::chunk {{ border-radius: 3px; }}"""
+        gl.addWidget(QtWidgets.QLabel("CPU 占用"))
+        self.cpu_bar = QtWidgets.QProgressBar(); self.cpu_bar.setRange(0,100); self.cpu_bar.setFormat("%v%")
+        self.cpu_bar.setStyleSheet(bs + f" QProgressBar::chunk {{ background-color: {DRACULA['cyan']}; border-radius: 3px; }}")
+        gl.addWidget(self.cpu_bar)
+        gl.addWidget(QtWidgets.QLabel("内存占用"))
+        self.mem_bar = QtWidgets.QProgressBar(); self.mem_bar.setRange(0,100); self.mem_bar.setFormat("%v%")
+        self.mem_bar.setStyleSheet(bs + f" QProgressBar::chunk {{ background-color: {DRACULA['green']}; border-radius: 3px; }}")
+        gl.addWidget(self.mem_bar)
+        gl.addWidget(QtWidgets.QLabel("磁盘占用"))
+        self.disk_bar = QtWidgets.QProgressBar(); self.disk_bar.setRange(0,100); self.disk_bar.setFormat("%v%")
+        self.disk_bar.setStyleSheet(bs + f" QProgressBar::chunk {{ background-color: {DRACULA['orange']}; border-radius: 3px; }}")
+        gl.addWidget(self.disk_bar)
+        self.uptime_label = QtWidgets.QLabel("运行时间: —")
+        self.uptime_label.setStyleSheet(f"color:{DRACULA['comment']};font-size:9pt;"); self.uptime_label.setWordWrap(True)
+        gl.addWidget(self.uptime_label)
+        pl.addWidget(g)
+
+    def _build_tunnel(self, pl):
+        g = QtWidgets.QGroupBox("端口转发")
+        gl = QtWidgets.QVBoxLayout(g)
+        ar = QtWidgets.QHBoxLayout()
+        self.tun_lport = QtWidgets.QLineEdit(); self.tun_lport.setPlaceholderText("本地端口"); self.tun_lport.setFixedWidth(70)
+        ar.addWidget(self.tun_lport); ar.addWidget(QtWidgets.QLabel("→"))
+        self.tun_rhost = QtWidgets.QLineEdit("127.0.0.1"); self.tun_rhost.setPlaceholderText("远程地址")
+        ar.addWidget(self.tun_rhost); ar.addWidget(QtWidgets.QLabel(":"))
+        self.tun_rport = QtWidgets.QLineEdit(); self.tun_rport.setPlaceholderText("远程端口"); self.tun_rport.setFixedWidth(70)
+        ar.addWidget(self.tun_rport)
+        gl.addLayout(ar)
+        br = QtWidgets.QHBoxLayout()
+        bs_ = QtWidgets.QPushButton("启动转发"); bs_.clicked.connect(self._start_tunnel)
+        be = QtWidgets.QPushButton("停止全部"); be.clicked.connect(self._stop_tunnels)
+        br.addWidget(bs_); br.addWidget(be)
+        gl.addLayout(br)
+        self.tunnel_list = QtWidgets.QListWidget(); self.tunnel_list.setMaximumHeight(80)
+        self.tunnel_list.setFont(QtGui.QFont("Consolas", 9))
+        self.tunnel_list.setStyleSheet(f"QListWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}")
+        gl.addWidget(self.tunnel_list)
+        self._tunnel_mgr.tunnel_started.connect(lambda l: (self.tunnel_list.addItem(l), self.log(f"隧道已启动: {l}")))
+        self._tunnel_mgr.tunnel_stopped.connect(lambda l: self.log(f"隧道已停止: {l}"))
+        self._tunnel_mgr.tunnel_error.connect(lambda l, e: self.log(f"隧道错误 {l}: {e}"))
+        pl.addWidget(g)
+
+    # ==================== 样式 ====================
 
     def _setup_styles(self):
         d = DRACULA
         self.setStyleSheet(f"""
-        * {{
-            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-            font-size: 10pt;
-        }}
-        QMainWindow, QWidget {{
-            background-color: {d['bg']};
-            color: {d['fg']};
-        }}
-        QGroupBox {{
-            border: 1px solid {d['selection']};
-            border-radius: 6px;
-            margin-top: 8px;
-            padding: 10px;
-            font-weight: bold;
-            color: {d['fg']};
-        }}
-        QGroupBox::title {{
-            subcontrol-origin: margin;
-            subcontrol-position: top left;
-            padding: 0 8px;
-            color: {d['purple']};
-            background-color: transparent;
-        }}
-        QPushButton {{
-            background-color: {d['comment']};
-            color: {d['fg']};
-            border-radius: 4px;
-            padding: 5px 12px;
-            border: 1px solid {d['comment']};
-        }}
-        QPushButton:hover {{
-            background-color: #7082b6;
-        }}
-        QPushButton:pressed {{
-            background-color: {d['selection']};
-        }}
-        QPushButton:disabled {{
-            background-color: {d['selection']};
-            color: #888888;
-            border-color: {d['selection']};
-        }}
-        QLineEdit, QTextEdit, QPlainTextEdit {{
-            background-color: {d['bg_darker']};
-            border: 1px solid {d['selection']};
-            border-radius: 4px;
-            padding: 3px 5px;
-            selection-background-color: {d['selection']};
-            selection-color: {d['fg']};
-        }}
-        QLineEdit:focus, QTextEdit:focus {{
-            border-color: {d['purple']};
-        }}
-        QComboBox {{
-            background-color: {d['bg_darker']};
-            border: 1px solid {d['selection']};
-            border-radius: 4px;
-            padding: 3px 5px;
-            color: {d['fg']};
-        }}
-        QComboBox QAbstractItemView {{
-            background-color: {d['bg_darker']};
-            color: {d['fg']};
-            selection-background-color: {d['selection']};
-        }}
-        QLabel {{
-            background-color: transparent;
-        }}
-        QScrollArea {{
-            border: none;
-        }}
-        QSplitter::handle {{
-            background-color: {d['selection']};
-        }}
-        QSplitter::handle:horizontal {{
-            width: 3px;
-        }}
-        QSplitter::handle:vertical {{
-            height: 3px;
-        }}
-        QScrollBar:vertical {{
-            background: {d['bg_darker']};
-            width: 10px;
-            border-radius: 5px;
-        }}
-        QScrollBar::handle:vertical {{
-            background: {d['comment']};
-            border-radius: 5px;
-            min-height: 20px;
-        }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-            height: 0px;
-        }}
-        QScrollBar:horizontal {{
-            background: {d['bg_darker']};
-            height: 10px;
-            border-radius: 5px;
-        }}
-        QScrollBar::handle:horizontal {{
-            background: {d['comment']};
-            border-radius: 5px;
-            min-width: 20px;
-        }}
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-            width: 0px;
-        }}
+        * {{ font-family: "Segoe UI","Microsoft YaHei","Helvetica Neue",sans-serif; font-size: 10pt; }}
+        QMainWindow, QWidget {{ background-color: {d['bg']}; color: {d['fg']}; }}
+        QGroupBox {{ border: 1px solid {d['selection']}; border-radius: 6px; margin-top: 8px; padding: 10px; font-weight: bold; color: {d['fg']}; }}
+        QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding: 0 8px; color: {d['purple']}; background-color: transparent; }}
+        QPushButton {{ background-color: {d['comment']}; color: {d['fg']}; border-radius: 4px; padding: 5px 12px; border: 1px solid {d['comment']}; }}
+        QPushButton:hover {{ background-color: #7082b6; }}
+        QPushButton:pressed {{ background-color: {d['selection']}; }}
+        QPushButton:disabled {{ background-color: {d['selection']}; color: #888; border-color: {d['selection']}; }}
+        QLineEdit, QTextEdit, QPlainTextEdit {{ background-color: {d['bg_darker']}; border: 1px solid {d['selection']}; border-radius: 4px; padding: 3px 5px; selection-background-color: {d['selection']}; selection-color: {d['fg']}; }}
+        QLineEdit:focus, QTextEdit:focus {{ border-color: {d['purple']}; }}
+        QLabel {{ background-color: transparent; }}
+        QScrollArea {{ border: none; }}
+        QSplitter::handle {{ background-color: {d['selection']}; }}
+        QSplitter::handle:horizontal {{ width: 3px; }}
+        QSplitter::handle:vertical {{ height: 3px; }}
+        QScrollBar:vertical {{ background: {d['bg_darker']}; width: 10px; border-radius: 5px; }}
+        QScrollBar::handle:vertical {{ background: {d['comment']}; border-radius: 5px; min-height: 20px; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        QScrollBar:horizontal {{ background: {d['bg_darker']}; height: 10px; border-radius: 5px; }}
+        QScrollBar::handle:horizontal {{ background: {d['comment']}; border-radius: 5px; min-width: 20px; }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
         """)
 
     def _setup_dark_titlebar(self):
-        """使用 Windows DWM API 将标题栏颜色设置为与背景一致"""
         if sys.platform != "win32":
             return
         try:
             hwnd = int(self.winId())
-            dwmapi = ctypes.windll.dwmapi
-            value = ctypes.c_int(1)
-            dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
-            bg_color = ctypes.c_int(0x00362a28)
-            dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(bg_color), ctypes.sizeof(bg_color))
-            text_color = ctypes.c_int(0x00f2f8f8)
-            dwmapi.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text_color), ctypes.sizeof(text_color))
+            dwm = ctypes.windll.dwmapi
+            v = ctypes.c_int(1)
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(v), ctypes.sizeof(v))
+            dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(ctypes.c_int(0x00362a28)), 4)
+            dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(ctypes.c_int(0x00f2f8f8)), 4)
         except Exception:
             pass
 
-    # -------------------- 历史记录 --------------------
+    # ==================== 会话分组树 ====================
 
-    def _load_history_to_combo(self):
-        entries = load_history()
-        for e in entries:
-            label = f"{e.get('username', '')}@{e.get('host', '')}:{e.get('port', 22)}"
-            self.history_combo.addItem(label, e)
+    def _load_session_tree(self):
+        self.session_tree.clear()
+        groups: dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for e in load_history():
+            gn = e.get("group", "默认")
+            if gn not in groups:
+                gi = QtWidgets.QTreeWidgetItem([gn])
+                gi.setForeground(0, QtGui.QColor(DRACULA["purple"]))
+                f = gi.font(0); f.setBold(True); gi.setFont(0, f)
+                self.session_tree.addTopLevelItem(gi)
+                groups[gn] = gi
+            label = f"{e.get('username','')}@{e.get('host','')}:{e.get('port',22)}"
+            ch = QtWidgets.QTreeWidgetItem([label])
+            ch.setData(0, QtCore.Qt.UserRole, e)
+            ch.setForeground(0, QtGui.QColor(DRACULA["fg"]))
+            groups[gn].addChild(ch)
+        self.session_tree.expandAll()
 
-    def _on_history_selected(self, index):
-        if index <= 0:
+    def _on_tree_dblclick(self, item, col):
+        data = item.data(0, QtCore.Qt.UserRole)
+        if not data:
             return
-        data = self.history_combo.itemData(index)
+        self.ip_edit.setText(data.get("host", ""))
+        self.port_edit.setText(str(data.get("port", 22)))
+        self.user_edit.setText(data.get("username", ""))
+        self.pass_edit.setText(decrypt_password(data.get("password_enc", "")))
+        self.on_connect()
+
+    def _add_group(self):
+        name, ok = QtWidgets.QInputDialog.getText(self, "新建分组", "分组名称:")
+        if ok and name.strip():
+            gi = QtWidgets.QTreeWidgetItem([name.strip()])
+            gi.setForeground(0, QtGui.QColor(DRACULA["purple"]))
+            f = gi.font(0); f.setBold(True); gi.setFont(0, f)
+            self.session_tree.addTopLevelItem(gi)
+
+    def _del_entry(self):
+        item = self.session_tree.currentItem()
+        if not item:
+            return
+        data = item.data(0, QtCore.Qt.UserRole)
         if data:
-            self.ip_edit.setText(data.get("host", ""))
-            self.port_edit.setText(str(data.get("port", 22)))
-            self.user_edit.setText(data.get("username", ""))
-            self.pass_edit.setText(decrypt_password(data.get("password_enc", "")))
-            # 自动连接
-            if self.btn_connect.isEnabled():
-                self.on_connect()
+            entries = load_history()
+            entries = [e for e in entries if not (e.get("host") == data.get("host") and e.get("port") == data.get("port") and e.get("username") == data.get("username"))]
+            save_history(entries)
+        p = item.parent()
+        if p:
+            p.removeChild(item)
+        else:
+            idx = self.session_tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                self.session_tree.takeTopLevelItem(idx)
 
-    def _browse_key_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择 SSH 密钥文件",
-            str(Path.home() / ".ssh"),
-            "All Files (*)"
-        )
-        if path:
-            self.key_edit.setText(path)
+    def _browse_key(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 SSH 密钥文件", str(Path.home() / ".ssh"), "All Files (*)")
+        if p:
+            self.key_edit.setText(p)
 
-    # -------------------- 连接 / 断开 --------------------
+    # ==================== 多标签连接 ====================
 
     def on_connect(self):
         host = self.ip_edit.text().strip()
-        port_str = self.port_edit.text().strip()
-        username = self.user_edit.text().strip()
-        password = self.pass_edit.text()
-        key_path = self.key_edit.text().strip() or None
-
+        port_s = self.port_edit.text().strip()
+        user = self.user_edit.text().strip()
+        pw = self.pass_edit.text()
+        kp = self.key_edit.text().strip() or None
         if not host:
-            QtWidgets.QMessageBox.warning(self, "提示", "请输入服务器 IP")
-            return
-        if not username:
-            QtWidgets.QMessageBox.warning(self, "提示", "请输入用户名")
-            return
-
+            QtWidgets.QMessageBox.warning(self, "提示", "请输入服务器 IP"); return
+        if not user:
+            QtWidgets.QMessageBox.warning(self, "提示", "请输入用户名"); return
         try:
-            port = int(port_str)
+            port = int(port_s)
         except ValueError:
             port = 22
 
         self.btn_connect.setEnabled(False)
         self.log(f"正在连接 {host}:{port} ...")
 
-        # 保存重连信息
-        self._reconnect_info = {"host": host, "port": port, "username": username,
-                                 "password": password, "key_path": key_path}
+        sess = Session(self)
+        tab_idx = self.tab_widget.addTab(sess.terminal, f"{user}@{host}")
+        self._sessions[tab_idx] = sess
+        self.tab_widget.setCurrentIndex(tab_idx)
 
-        # 在线程中连接，避免阻塞 UI
-        def do_connect():
-            try:
-                self._ssh.connect(host, port, username, password, key_path)
-                cols, rows = self.terminal._calc_grid()
-                self._channel = self._ssh.open_shell(cols, rows)
-                self.terminal.set_channel(self._channel)
+        sess.connected.connect(lambda s=sess, h=host, p=port, u=user, pw_=pw: self._sess_ok(s, h, p, u, pw_))
+        sess.disconnected.connect(lambda s=sess: self._sess_disc(s))
+        sess.connect_failed.connect(lambda m: self._sess_fail(m))
+        sess.log_message.connect(self.log)
+        sess.connect(host, port, user, pw, kp)
 
-                self._reader = SshReaderThread(self._channel)
-                self._reader.data_ready.connect(self.terminal.feed_data)
-                self._reader.disconnected.connect(self._on_disconnected)
-                self._reader.start()
-
-                self._panel_thread = PanelRefreshThread(self._exec)
-                self._panel_thread.dir_ready.connect(self._update_dir)
-                self._panel_thread.sys_ready.connect(self._update_sys)
-                self._panel_thread.start()
-
-                # 保存到历史
-                add_history_entry(host, port, username, password)
-
-                QtCore.QMetaObject.invokeMethod(self, "_on_connected",
-                                                 QtCore.Qt.QueuedConnection)
-            except Exception as e:
-                self.log(f"连接失败: {e}")
-                QtCore.QMetaObject.invokeMethod(self, "_on_connect_failed",
-                                                 QtCore.Qt.QueuedConnection)
-
-        t = threading.Thread(target=do_connect, daemon=True)
-        t.start()
-
-    @QtCore.Slot()
-    def _on_connected(self):
-        self.log("连接成功！")
-        self.btn_connect.setEnabled(False)
+    def _sess_ok(self, sess, host, port, user, pw):
+        self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(True)
         self.status_dot.setStyleSheet("border-radius:6px;background:#50fa7b;")
         self.status_label.setText("已连接")
-        self.terminal.setFocus()
-        # 刷新历史下拉
-        self.history_combo.clear()
-        self.history_combo.addItem("— 选择历史连接 —")
-        self._load_history_to_combo()
+        sess.terminal.setFocus()
+        if sess.panel_thread:
+            sess.panel_thread.dir_ready.connect(self._update_dir)
+            sess.panel_thread.sys_ready.connect(self._update_sys)
+        add_history_entry(host, port, user, pw)
+        self._load_session_tree()
 
-    @QtCore.Slot()
-    def _on_connect_failed(self):
+    def _sess_fail(self, msg):
+        self.log(f"连接失败: {msg}")
         self.btn_connect.setEnabled(True)
 
-    @QtCore.Slot()
-    def _on_disconnected(self):
-        self.log("连接已断开")
-        self._cleanup()
-        # 尝试自动重连
-        if self._reconnect_info:
-            self._try_reconnect()
-
-    def _try_reconnect(self):
-        """断线后自动尝试重连一次"""
-        info = self._reconnect_info
-        if not info:
-            return
-        self._reconnect_info = None  # 只重连一次，避免无限循环
-        self.log("正在尝试自动重连...")
-
-        def do_reconnect():
-            import time as _t
-            _t.sleep(2)  # 等待 2 秒后重连
-            try:
-                self._ssh.connect(info["host"], info["port"], info["username"],
-                                  info.get("password"), info.get("key_path"))
-                cols, rows = self.terminal._calc_grid()
-                self._channel = self._ssh.open_shell(cols, rows)
-                self.terminal.set_channel(self._channel)
-
-                self._reader = SshReaderThread(self._channel)
-                self._reader.data_ready.connect(self.terminal.feed_data)
-                self._reader.disconnected.connect(self._on_disconnected)
-                self._reader.start()
-
-                self._panel_thread = PanelRefreshThread(self._exec)
-                self._panel_thread.dir_ready.connect(self._update_dir)
-                self._panel_thread.sys_ready.connect(self._update_sys)
-                self._panel_thread.start()
-
-                # 恢复重连信息以支持再次断线重连
-                self._reconnect_info = info
-                QtCore.QMetaObject.invokeMethod(self, "_on_connected",
-                                                 QtCore.Qt.QueuedConnection)
-            except Exception as e:
-                self.log(f"自动重连失败: {e}")
-                QtCore.QMetaObject.invokeMethod(self, "_on_connect_failed",
-                                                 QtCore.Qt.QueuedConnection)
-
-        threading.Thread(target=do_reconnect, daemon=True).start()
+    def _sess_disc(self, sess):
+        for idx, s in list(self._sessions.items()):
+            if s is sess:
+                self.tab_widget.setTabText(idx, self.tab_widget.tabText(idx) + " (断开)")
+                break
+        if self._current_session() is sess:
+            self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
+            self.status_label.setText("已断开")
+            self._reset_panels()
 
     def on_disconnect(self):
-        self._reconnect_info = None  # 手动断开不重连
-        self.log("正在断开连接...")
-        self._cleanup()
+        sess = self._current_session()
+        if sess:
+            sess.disconnect()
+            self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
+            self.status_label.setText("未连接")
+            self.btn_disconnect.setEnabled(False)
+            self._reset_panels()
 
-    def _cleanup(self):
-        if self._reader:
-            self._reader.stop()
-            self._reader.wait(2000)
-            self._reader = None
+    def _on_tab_close(self, index):
+        sess = self._sessions.pop(index, None)
+        if sess:
+            sess.disconnect()
+        self.tab_widget.removeTab(index)
+        new = {}
+        for i in range(self.tab_widget.count()):
+            for _, s in self._sessions.items():
+                if self.tab_widget.widget(i) is s.terminal:
+                    new[i] = s; break
+        self._sessions = new
+        if not self._sessions:
+            self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
+            self.status_label.setText("未连接")
+            self.btn_disconnect.setEnabled(False)
+            self._reset_panels()
 
-        if self._panel_thread:
-            self._panel_thread.stop()
-            self._panel_thread.wait(2000)
-            self._panel_thread = None
+    def _on_tab_changed(self, index):
+        sess = self._sessions.get(index)
+        if sess and sess.is_connected:
+            self.status_dot.setStyleSheet("border-radius:6px;background:#50fa7b;")
+            self.status_label.setText("已连接")
+            self.btn_disconnect.setEnabled(True)
+        else:
+            self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
+            self.status_label.setText("未连接" if not sess else "已断开")
+            self.btn_disconnect.setEnabled(False)
 
-        self.terminal.set_channel(None)  # 停止 writer 线程
-
-        if self._channel:
-            try:
-                self._channel.close()
-            except Exception:
-                pass
-            self._channel = None
-
-        self._ssh.close()
-
-        self.btn_connect.setEnabled(True)
-        self.btn_disconnect.setEnabled(False)
-        self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
-        self.status_label.setText("未连接")
-        self.dir_path_label.setText("—")
-        self.file_list.clear()
-        self.cpu_bar.setValue(0)
-        self.mem_bar.setValue(0)
-        self.disk_bar.setValue(0)
+    def _reset_panels(self):
+        self.dir_path_label.setText("—"); self.file_list.clear()
+        self.cpu_bar.setValue(0); self.mem_bar.setValue(0); self.disk_bar.setValue(0)
         self.uptime_label.setText("运行时间: —")
 
-    # -------------------- 面板更新 --------------------
+    # ==================== 面板更新 ====================
 
     @QtCore.Slot(str, list)
-    def _update_dir(self, cwd: str, file_names: list):
-        new_names = []
+    def _update_dir(self, cwd, fns):
+        nn = []
         if cwd and cwd != "/":
-            new_names.append("../")
-        for name in file_names:
-            name = name.strip()
-            if name:
-                new_names.append(name)
-
-        if (hasattr(self, '_last_dir_cwd') and self._last_dir_cwd == cwd
-                and hasattr(self, '_last_dir_names') and self._last_dir_names == new_names):
+            nn.append("../")
+        for n in fns:
+            n = n.strip()
+            if n:
+                nn.append(n)
+        if getattr(self, '_last_cwd', None) == cwd and getattr(self, '_last_fns', None) == nn:
             return
-        self._last_dir_cwd = cwd
-        self._last_dir_names = list(new_names)
-
-        scrollbar = self.file_list.verticalScrollBar()
-        scroll_pos = scrollbar.value() if scrollbar else 0
-
+        self._last_cwd = cwd; self._last_fns = list(nn)
         self.dir_path_label.setText(cwd or "—")
         self.file_list.clear()
-
-        for name in new_names:
-            item = QtWidgets.QListWidgetItem(name)
-            if name == "../":
-                item.setForeground(QtGui.QColor(DRACULA["orange"]))
-                item.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp))
-                item.setToolTip("双击返回上级目录")
-            elif name.endswith("/"):
-                item.setForeground(QtGui.QColor(DRACULA["cyan"]))
-                item.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
-                item.setToolTip("双击进入目录")
-            elif name.endswith("@"):
-                item.setForeground(QtGui.QColor(DRACULA["pink"]))
-            elif name.endswith("*"):
-                item.setForeground(QtGui.QColor(DRACULA["green"]))
+        for n in nn:
+            it = QtWidgets.QListWidgetItem(n)
+            if n == "../":
+                it.setForeground(QtGui.QColor(DRACULA["orange"]))
+                it.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowUp))
+            elif n.endswith("/"):
+                it.setForeground(QtGui.QColor(DRACULA["cyan"]))
+                it.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon))
+            elif n.endswith("@"):
+                it.setForeground(QtGui.QColor(DRACULA["pink"]))
+            elif n.endswith("*"):
+                it.setForeground(QtGui.QColor(DRACULA["green"]))
             else:
-                item.setForeground(QtGui.QColor(DRACULA["fg"]))
-                item.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
-            self.file_list.addItem(item)
-
-        if scrollbar:
-            scrollbar.setValue(scroll_pos)
+                it.setForeground(QtGui.QColor(DRACULA["fg"]))
+                it.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
+            self.file_list.addItem(it)
 
     @QtCore.Slot(float, float, float, str)
-    def _update_sys(self, cpu_pct: float, mem_pct: float, disk_pct: float, uptime: str):
-        self.cpu_bar.setValue(int(cpu_pct))
-        self.mem_bar.setValue(int(mem_pct))
-        self.disk_bar.setValue(int(disk_pct))
-        self.uptime_label.setText(f"运行时间: {uptime}" if uptime else "运行时间: —")
+    def _update_sys(self, cpu, mem, disk, up):
+        self.cpu_bar.setValue(int(cpu)); self.mem_bar.setValue(int(mem)); self.disk_bar.setValue(int(disk))
+        self.uptime_label.setText(f"运行时间: {up}" if up else "运行时间: —")
 
-    # -------------------- 文件列表交互 --------------------
+    # ==================== 文件操作 ====================
 
-    def _navigate_to_dir(self, abs_path: str):
-        """导航到指定绝对路径：终端 cd + 面板立即刷新"""
-        if not self._channel or not self.terminal._writer:
+    def _nav(self, path):
+        sess = self._current_session()
+        if not sess or not sess.is_connected or not sess.terminal._writer:
             return
-
-        cmd = f"cd {self._shell_quote(abs_path)}\r"
-        self.terminal._send_data(cmd.encode("utf-8"))
-
-        if self._panel_thread:
-            self._panel_thread.set_cwd(abs_path)
-
-        self._last_dir_cwd = None
-        self._last_dir_names = None
-
-        self.log(f"进入目录: {abs_path}")
-
-        if self._exec.connected and self._panel_thread:
-            refresh_cmd = self._panel_thread._build_cmd()
-            def do_refresh():
-                raw = self._exec.exec_cmd(refresh_cmd)
-                sections = {}
-                current_key = None
-                for line in raw.split("\n"):
-                    stripped = line.strip()
-                    if stripped.startswith("===") and stripped.endswith("==="):
-                        current_key = stripped.strip("=")
-                        sections[current_key] = ""
-                    elif current_key:
-                        sections[current_key] = sections[current_key] + line + "\n"
-                cwd = sections.get("PWD", "").strip()
-                ls_raw = sections.get("LS", "").strip()
-                file_names = [f for f in ls_raw.split("\n") if f.strip()]
-                if cwd:
-                    self._panel_thread.set_cwd(cwd)
-                self._nav_result = (cwd, file_names)
-                QtCore.QMetaObject.invokeMethod(self, "_apply_nav_refresh",
-                                                 QtCore.Qt.QueuedConnection)
-            threading.Thread(target=do_refresh, daemon=True).start()
-
-    @QtCore.Slot()
-    def _apply_nav_refresh(self):
-        if hasattr(self, '_nav_result'):
-            cwd, file_names = self._nav_result
-            self._last_dir_cwd = None
-            self._last_dir_names = None
-            self._update_dir(cwd, file_names)
-            del self._nav_result
+        sess.terminal._send_data(f"cd {self._sq(path)}\r".encode("utf-8"))
+        if sess.panel_thread:
+            sess.panel_thread.set_cwd(path)
+        self._last_cwd = None; self._last_fns = None
+        self.log(f"进入目录: {path}")
 
     @QtCore.Slot(QtWidgets.QListWidgetItem)
-    def _on_file_double_clicked(self, item: QtWidgets.QListWidgetItem):
-        if not self._channel:
+    def _on_file_dblclick(self, item):
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
             return
         name = item.text().strip()
-        if not name or not name.endswith("/"):
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—" or not cwd or not name:
             return
-
-        panel_cwd = self.dir_path_label.text().strip()
-        if panel_cwd == "—" or not panel_cwd:
-            return
-
-        dir_name = name.rstrip("/")
-        if dir_name == "..":
-            if panel_cwd == "/":
-                return
-            abs_path = "/".join(panel_cwd.rstrip("/").split("/")[:-1]) or "/"
+        if name.endswith("/"):
+            dn = name.rstrip("/")
+            if dn == "..":
+                ap = "/".join(cwd.rstrip("/").split("/")[:-1]) or "/"
+            else:
+                ap = cwd.rstrip("/") + "/" + dn
+            self._nav(ap)
         else:
-            abs_path = panel_cwd.rstrip("/") + "/" + dir_name
+            dn = name.rstrip("*@")
+            rp = cwd.rstrip("/") + "/" + dn
+            self._open_editor(sess, rp)
 
-        self._navigate_to_dir(abs_path)
+    def _open_editor(self, sess, rp):
+        sftp = sess.get_sftp()
+        if not sftp:
+            self.log("无法打开 SFTP 通道"); return
+        ed = RemoteEditorWidget(sftp, rp)
+        ed.log_message.connect(self.log)
+        idx = self.tab_widget.addTab(ed, f"✏ {os.path.basename(rp)}")
+        self.tab_widget.setCurrentIndex(idx)
+        self.log(f"编辑: {rp}")
 
     @QtCore.Slot()
-    def _on_back_clicked(self):
-        if not self._channel:
+    def _on_back(self):
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—" or not cwd or cwd == "/":
             return
-        panel_cwd = self.dir_path_label.text().strip()
-        if panel_cwd == "—" or not panel_cwd or panel_cwd == "/":
-            return
-        abs_path = "/".join(panel_cwd.rstrip("/").split("/")[:-1]) or "/"
-        self._navigate_to_dir(abs_path)
+        self._nav("/".join(cwd.rstrip("/").split("/")[:-1]) or "/")
 
     @QtCore.Slot(QtCore.QPoint)
-    def _on_file_context_menu(self, pos: QtCore.QPoint):
+    def _on_file_ctx(self, pos):
         item = self.file_list.itemAt(pos)
-        if not item:
+        sess = self._current_session()
+        if not item or not sess or not sess.is_connected:
             return
-        if not self._channel:
-            return
-
         name = item.text().strip()
         if not name:
             return
-
-        menu = QtWidgets.QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {DRACULA['bg_lighter']};
-                color: {DRACULA['fg']};
-                border: 1px solid {DRACULA['selection']};
-                border-radius: 4px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 20px;
-                border-radius: 3px;
-            }}
-            QMenu::item:selected {{
-                background-color: {DRACULA['selection']};
-            }}
-        """)
-
+        menu = QtWidgets.QMenu(self); menu.setStyleSheet(_MENU_STYLE)
         is_dir = name.endswith("/")
-        display_name = name.rstrip("/*@")
-
+        dn = name.rstrip("/*@")
+        cwd = self.dir_path_label.text().strip()
         if is_dir:
-            action_enter = menu.addAction(f"进入目录  {display_name}")
-            action_enter.triggered.connect(lambda: self._on_file_double_clicked(item))
+            menu.addAction(f"进入 {dn}").triggered.connect(lambda: self._on_file_dblclick(item))
             menu.addSeparator()
-
-        action_delete = menu.addAction(f"删除  {display_name}")
-        action_delete.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_TrashIcon))
-
-        chosen = menu.exec(self.file_list.mapToGlobal(pos))
-        if chosen == action_delete:
-            self._confirm_delete(name)
-
-    def _confirm_delete(self, name: str):
-        is_dir = name.endswith("/")
-        display_name = name.rstrip("/*@")
-        type_str = "文件夹" if is_dir else "文件"
-
-        if display_name == "..":
-            return
-
-        panel_cwd = self.dir_path_label.text().strip()
-        if panel_cwd == "—" or not panel_cwd:
-            return
-        abs_path = panel_cwd.rstrip("/") + "/" + display_name
-
-        reply = QtWidgets.QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除{type_str} \"{abs_path}\" 吗？\n\n此操作不可恢复！",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            QtWidgets.QMessageBox.No
-        )
-        if reply != QtWidgets.QMessageBox.Yes:
-            return
-
-        quoted = self._shell_quote(abs_path)
-        if is_dir:
-            cmd = f"rm -rf {quoted}"
         else:
-            cmd = f"rm -f {quoted}"
+            rp = (cwd.rstrip("/") + "/" + dn) if cwd != "—" else ""
+            menu.addAction(f"编辑 {dn}").triggered.connect(lambda: self._open_editor(sess, rp))
+            menu.addAction(f"下载 {dn}").triggered.connect(lambda: self._sftp_dl_file(sess, rp))
+            menu.addSeparator()
+        if dn != "..":
+            menu.addAction(f"删除 {dn}").triggered.connect(lambda: self._confirm_del(name))
+        menu.exec(self.file_list.mapToGlobal(pos))
 
+    def _confirm_del(self, name):
+        sess = self._current_session()
+        if not sess:
+            return
+        is_dir = name.endswith("/")
+        dn = name.rstrip("/*@")
+        if dn == "..":
+            return
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—":
+            return
+        ap = cwd.rstrip("/") + "/" + dn
+        r = QtWidgets.QMessageBox.question(self, "确认删除", f"确定要删除 \"{ap}\" 吗？\n此操作不可恢复！",
+                                           QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        cmd = f"rm -rf {self._sq(ap)}" if is_dir else f"rm -f {self._sq(ap)}"
         self.log(f"正在删除: {cmd}")
+        threading.Thread(target=lambda: self.log(sess.exec_helper.exec_cmd(cmd + " 2>&1").strip() or f"已删除: {dn}"), daemon=True).start()
 
-        def do_delete():
-            result = self._exec.exec_cmd(cmd + " 2>&1")
-            if result.strip():
-                self.log(f"删除结果: {result.strip()}")
-            else:
-                self.log(f"已删除: {display_name}")
-            QtCore.QMetaObject.invokeMethod(self, "_refresh_after_delete",
-                                             QtCore.Qt.QueuedConnection)
+    # ==================== SFTP ====================
 
-        t = threading.Thread(target=do_delete, daemon=True)
+    def _sftp_upload(self):
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
+            self.log("请先连接服务器"); return
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择要上传的文件")
+        if not files:
+            return
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—":
+            cwd = "~"
+        sftp = sess.get_sftp()
+        if not sftp:
+            self.log("无法打开 SFTP 通道"); return
+        t = SftpThread(sftp, self)
+        for f in files:
+            t.add_upload(f, cwd.rstrip("/") + "/" + os.path.basename(f))
+        t.progress.connect(self._sftp_prog)
+        t.finished.connect(self._sftp_fin)
+        t.all_done.connect(self._sftp_done)
+        self.sftp_progress.setVisible(True); self.sftp_progress.setValue(0)
         t.start()
+        self.log(f"开始上传 {len(files)} 个文件")
+
+    def _sftp_download(self):
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
+            self.log("请先连接服务器"); return
+        item = self.file_list.currentItem()
+        if not item:
+            self.log("请先选择文件"); return
+        name = item.text().strip().rstrip("*@")
+        if not name or name.endswith("/"):
+            self.log("请选择文件而非目录"); return
+        cwd = self.dir_path_label.text().strip()
+        rp = (cwd.rstrip("/") + "/" + name) if cwd != "—" else name
+        self._sftp_dl_file(sess, rp)
+
+    def _sftp_dl_file(self, sess, rp):
+        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "保存文件", os.path.basename(rp))
+        if not save_path:
+            return
+        sftp = sess.get_sftp()
+        if not sftp:
+            self.log("无法打开 SFTP 通道"); return
+        t = SftpThread(sftp, self)
+        t.add_download(rp, save_path)
+        t.progress.connect(self._sftp_prog)
+        t.finished.connect(self._sftp_fin)
+        t.all_done.connect(self._sftp_done)
+        self.sftp_progress.setVisible(True); self.sftp_progress.setValue(0)
+        t.start()
+        self.log(f"开始下载: {rp}")
+
+    @QtCore.Slot(str, int, int)
+    def _sftp_prog(self, fn, done, total):
+        if total > 0:
+            self.sftp_progress.setValue(int(done * 100 / total))
+        self.sftp_status.setText(f"{fn}: {done // 1024}KB / {total // 1024}KB")
+
+    @QtCore.Slot(str, bool, str)
+    def _sftp_fin(self, fn, ok, msg):
+        self.log(f"{'✓' if ok else '✗'} {fn}: {msg}")
 
     @QtCore.Slot()
-    def _refresh_after_delete(self):
-        if self.terminal._writer:
-            self.terminal._send_data(b"ls\r")
-        if self._exec.connected and self._panel_thread:
-            refresh_cmd = self._panel_thread._build_cmd()
-            def do_refresh():
-                raw = self._exec.exec_cmd(refresh_cmd)
-                sections = {}
-                current_key = None
-                for line in raw.split("\n"):
-                    stripped = line.strip()
-                    if stripped.startswith("===") and stripped.endswith("==="):
-                        current_key = stripped.strip("=")
-                        sections[current_key] = ""
-                    elif current_key:
-                        sections[current_key] = sections[current_key] + line + "\n"
-                cwd = sections.get("PWD", "").strip()
-                ls_raw = sections.get("LS", "").strip()
-                file_names = [f for f in ls_raw.split("\n") if f.strip()]
-                self.dir_ready_from_delete = (cwd, file_names)
-                QtCore.QMetaObject.invokeMethod(self, "_apply_dir_refresh",
-                                                 QtCore.Qt.QueuedConnection)
-            threading.Thread(target=do_refresh, daemon=True).start()
+    def _sftp_done(self):
+        self.sftp_progress.setVisible(False)
+        self.sftp_status.setText("传输完成")
 
-    @QtCore.Slot()
-    def _apply_dir_refresh(self):
-        if hasattr(self, 'dir_ready_from_delete'):
-            cwd, file_names = self.dir_ready_from_delete
-            self._last_dir_cwd = None
-            self._last_dir_names = None
-            self._update_dir(cwd, file_names)
-            del self.dir_ready_from_delete
+    # ==================== 隧道 ====================
+
+    def _start_tunnel(self):
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
+            self.log("请先连接服务器"); return
+        try:
+            lp = int(self.tun_lport.text())
+            rh = self.tun_rhost.text().strip()
+            rp = int(self.tun_rport.text())
+        except (ValueError, AttributeError):
+            self.log("请输入有效的端口号"); return
+        transport = sess.ssh._ssh.get_transport() if sess.ssh._ssh else None
+        if not transport:
+            self.log("无可用的 SSH 传输通道"); return
+        entry = TunnelEntry(lp, rh, rp)
+        self._tunnel_mgr.start_local_forward(transport, entry)
+
+    def _stop_tunnels(self):
+        self._tunnel_mgr.stop_all()
+        self.tunnel_list.clear()
+        self.log("所有隧道已停止")
+
+    # ==================== 工具 ====================
 
     @staticmethod
-    def _shell_quote(s: str) -> str:
-        """安全转义 shell 参数，防止命令注入"""
+    def _sq(s):
         return "'" + s.replace("'", "'\\''") + "'"
 
-    # -------------------- 窗口关闭 --------------------
-
     def closeEvent(self, event):
-        self._reconnect_info = None
-        self._cleanup()
+        self._tunnel_mgr.stop_all()
+        for s in self._sessions.values():
+            s.disconnect()
+        self._sessions.clear()
         super().closeEvent(event)
