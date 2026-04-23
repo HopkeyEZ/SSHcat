@@ -31,7 +31,7 @@ jobs:
           path: SSHcat-${{ github.event.inputs.version }}-windows-x64.zip
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,11 +40,11 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-render-util0
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller Pillow
       - name: Build with PyInstaller
         run: |
           pyinstaller --noconfirm --name SSHcat --icon icon.png --windowed --add-data "icon.png:." run.py
@@ -67,14 +67,14 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller Pillow
       - name: Build with PyInstaller
         run: |
           pyinstaller --noconfirm --name SSHcat --icon icon.png --windowed --add-data "icon.png:." run.py
       - name: Create zip
         run: |
           cd dist
-          zip -r ../SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip SSHcat/
+          zip -r ../SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip SSHcat.app/
       - uses: actions/upload-artifact@v4
         with:
           name: macos-build
