@@ -6,3 +6,5 @@ dist/
 *.egg-info/
 .pytest_cache/
 .sshcat_history.json
+SSHcat.spec
+build_gui.bat
