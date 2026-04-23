@@ -352,6 +352,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._on_file_ctx)
         self.file_list.itemDoubleClicked.connect(self._on_file_dblclick)
+        # 拖拽支持
+        self.file_list.setAcceptDrops(True)
+        self.file_list.setDragEnabled(True)
+        self.file_list.setDragDropMode(QtWidgets.QAbstractItemView.DragDrop)
+        self.file_list.setDefaultDropAction(QtCore.Qt.CopyAction)
+        self.file_list.dragEnterEvent = self._drag_enter
+        self.file_list.dragMoveEvent = self._drag_move
+        self.file_list.dropEvent = self._drop_event
+        self.file_list.startDrag = self._start_drag
+
+        self._drop_hint = QtWidgets.QLabel("拖拽文件到此处上传")
+        self._drop_hint.setAlignment(QtCore.Qt.AlignCenter)
+        self._drop_hint.setStyleSheet(f"""
+            background-color: {DRACULA['selection']}; color: {DRACULA['cyan']};
+            border: 2px dashed {DRACULA['cyan']}; border-radius: 6px;
+            padding: 8px; font-size: 9pt;
+        """)
+        self._drop_hint.setVisible(False)
+        gl.addWidget(self._drop_hint)
+
         gl.addWidget(self.file_list)
         pl.addWidget(g)
 
@@ -762,6 +782,86 @@ class MainWindow(QtWidgets.QMainWindow):
         cmd = f"rm -rf {self._sq(ap)}" if is_dir else f"rm -f {self._sq(ap)}"
         self.log(f"正在删除: {cmd}")
         threading.Thread(target=lambda: self.log(sess.exec_helper.exec_cmd(cmd + " 2>&1").strip() or f"已删除: {dn}"), daemon=True).start()
+
+    # ==================== 拖拽上传/下载 ====================
+
+    def _drag_enter(self, event):
+        if event.mimeData().hasUrls():
+            self._drop_hint.setVisible(True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _drag_move(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _drop_event(self, event):
+        self._drop_hint.setVisible(False)
+        if not event.mimeData().hasUrls():
+            return
+        files = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile() and os.path.isfile(u.toLocalFile())]
+        if not files:
+            return
+        self._upload_files(files)
+
+    def _start_drag(self, supported_actions):
+        """从文件列表拖拽远程文件 → 下载到本地临时目录后提供给系统。"""
+        item = self.file_list.currentItem()
+        if not item:
+            return
+        name = item.text().strip().rstrip("*@")
+        if not name or name.endswith("/") or name == "..":
+            return
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
+            return
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—":
+            return
+        rp = cwd.rstrip("/") + "/" + name
+
+        # 下载到临时目录
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="sshcat_")
+        local_path = os.path.join(tmp_dir, name)
+        sftp = sess.get_sftp()
+        if not sftp:
+            return
+        try:
+            sftp.get(rp, local_path)
+        except Exception as e:
+            self.log(f"拖拽下载失败: {e}")
+            return
+
+        drag = QtGui.QDrag(self.file_list)
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(local_path)])
+        drag.setMimeData(mime)
+        drag.exec(QtCore.Qt.CopyAction)
+        self.log(f"已拖拽下载: {name}")
+
+    def _upload_files(self, files):
+        sess = self._current_session()
+        if not sess or not sess.is_connected:
+            self.log("请先连接服务器"); return
+        cwd = self.dir_path_label.text().strip()
+        if cwd == "—":
+            cwd = "~"
+        sftp = sess.get_sftp()
+        if not sftp:
+            self.log("无法打开 SFTP 通道"); return
+        t = SftpThread(sftp, self)
+        for f in files:
+            t.add_upload(f, cwd.rstrip("/") + "/" + os.path.basename(f))
+        t.progress.connect(self._sftp_prog)
+        t.finished.connect(self._sftp_fin)
+        t.all_done.connect(self._sftp_done)
+        self.sftp_progress.setVisible(True); self.sftp_progress.setValue(0)
+        t.start()
+        self.log(f"拖拽上传 {len(files)} 个文件")
 
     # ==================== SFTP ====================
 
