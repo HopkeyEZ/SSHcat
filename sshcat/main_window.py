@@ -356,7 +356,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pl.addWidget(g)
 
     def _build_sftp(self, pl):
-        g = QtWidgets.QGroupBox("SFTP 文件传输")
+        g = QtWidgets.QGroupBox("")
+        g.setStyleSheet("QGroupBox { border: none; margin-top: 0px; padding: 0px; }")
         gl = QtWidgets.QVBoxLayout(g)
         br = QtWidgets.QHBoxLayout()
         self.btn_upload = QtWidgets.QPushButton("上传文件"); self.btn_upload.clicked.connect(self._sftp_upload)
