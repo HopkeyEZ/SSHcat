@@ -179,9 +179,12 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("SSHcat")
         self.resize(1200, 700)
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icon.ico")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QtGui.QIcon(icon_path))
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        for icon_name in ["icon.ico", "icon.png"]:
+            icon_path = os.path.join(base, icon_name)
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QtGui.QIcon(icon_path))
+                break
 
         self._sessions: dict[int, Session] = {}
         self._tunnel_mgr = TunnelManager(self)
@@ -275,7 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_edit = QtWidgets.QTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setMaximumHeight(120)
-        self.log_edit.setFont(QtGui.QFont("Consolas", 9))
+        self.log_edit.setFont(self._mono_font(9))
         sp_main.addWidget(self.log_edit)
         sp_main.setStretchFactor(0, 5)
         sp_main.setStretchFactor(1, 1)
@@ -312,7 +315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_tree = QtWidgets.QTreeWidget()
         self.session_tree.setHeaderLabels(["连接"])
         self.session_tree.setMaximumHeight(160)
-        self.session_tree.setFont(QtGui.QFont("Consolas", 9))
+        self.session_tree.setFont(self._mono_font(9))
         self.session_tree.setStyleSheet(f"""
             QTreeWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}
             QTreeWidget::item {{ padding: 2px 4px; }}
@@ -343,7 +346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addLayout(dh)
         self.file_list = QtWidgets.QListWidget()
         self.file_list.setMaximumHeight(180)
-        self.file_list.setFont(QtGui.QFont("Consolas", 9))
+        self.file_list.setFont(self._mono_font(9))
         self.file_list.setStyleSheet(f"""
             QListWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}
             QListWidget::item {{ padding: 2px 4px; }}
@@ -412,7 +415,7 @@ class MainWindow(QtWidgets.QMainWindow):
         br.addWidget(bs_); br.addWidget(be)
         gl.addLayout(br)
         self.tunnel_list = QtWidgets.QListWidget(); self.tunnel_list.setMaximumHeight(80)
-        self.tunnel_list.setFont(QtGui.QFont("Consolas", 9))
+        self.tunnel_list.setFont(self._mono_font(9))
         self.tunnel_list.setStyleSheet(f"QListWidget {{ background-color: {DRACULA['bg_darker']}; border: 1px solid {DRACULA['selection']}; border-radius: 4px; }}")
         gl.addWidget(self.tunnel_list)
         self._tunnel_mgr.tunnel_started.connect(lambda l: (self.tunnel_list.addItem(l), self.log(f"隧道已启动: {l}")))
@@ -425,7 +428,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_styles(self):
         d = DRACULA
         self.setStyleSheet(f"""
-        * {{ font-family: "Segoe UI","Microsoft YaHei","Helvetica Neue",sans-serif; font-size: 10pt; }}
+        * {{ font-family: "Segoe UI","Microsoft YaHei","Helvetica Neue","Ubuntu","Noto Sans CJK SC",sans-serif; font-size: 10pt; }}
         QMainWindow, QWidget {{ background-color: {d['bg']}; color: {d['fg']}; }}
         QGroupBox {{ border: 1px solid {d['selection']}; border-radius: 6px; margin-top: 8px; padding: 10px; font-weight: bold; color: {d['fg']}; }}
         QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding: 0 8px; color: {d['purple']}; background-color: transparent; }}
@@ -898,6 +901,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log("所有隧道已停止")
 
     # ==================== 工具 ====================
+
+    @staticmethod
+    def _mono_font(size=9):
+        """跨平台等宽字体"""
+        f = QtGui.QFont()
+        for name in ["Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono", "Courier New", "monospace"]:
+            f.setFamily(name)
+            fm = QtGui.QFontMetrics(f)
+            if fm.horizontalAdvance("M") == fm.horizontalAdvance("i"):
+                break
+        f.setPointSize(size)
+        f.setStyleHint(QtGui.QFont.Monospace)
+        return f
 
     @staticmethod
     def _sq(s):

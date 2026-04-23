@@ -55,7 +55,13 @@ class RemoteEditorWidget(QtWidgets.QWidget):
 
         # 编辑器
         self._editor = QtWidgets.QPlainTextEdit()
-        font = QtGui.QFont("Consolas", 11)
+        font = QtGui.QFont()
+        for name in ["Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono", "Courier New", "monospace"]:
+            font.setFamily(name)
+            fm = QtGui.QFontMetrics(font)
+            if fm.horizontalAdvance("M") == fm.horizontalAdvance("i"):
+                break
+        font.setPointSize(11)
         font.setStyleHint(QtGui.QFont.Monospace)
         self._editor.setFont(font)
         self._editor.setStyleSheet(f"""

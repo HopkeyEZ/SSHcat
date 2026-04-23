@@ -26,7 +26,7 @@ class TerminalWidget(QtWidgets.QWidget):
 
         # 字体 + 预构建变体
         self._font = QtGui.QFont()
-        for name in ["Consolas", "Cascadia Mono", "Courier New", "monospace"]:
+        for name in ["Consolas", "Cascadia Mono", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono", "Courier New", "monospace"]:
             self._font.setFamily(name)
             fm = QtGui.QFontMetrics(self._font)
             if fm.horizontalAdvance("M") == fm.horizontalAdvance("i"):

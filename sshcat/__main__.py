@@ -12,10 +12,13 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # 设置应用图标
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icon.ico")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QtGui.QIcon(icon_path))
+    # 设置应用图标 (跨平台: .ico / .png)
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    for icon_name in ["icon.ico", "icon.png"]:
+        icon_path = os.path.join(base, icon_name)
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QtGui.QIcon(icon_path))
+            break
 
     win = MainWindow()
     win.show()
