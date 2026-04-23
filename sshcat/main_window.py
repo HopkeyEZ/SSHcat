@@ -52,6 +52,110 @@ def add_history_entry(host, port, username, password="", group="默认"):
     save_history(entries)
 
 
+# ====================== 连接对话框 ======================
+
+class ConnectDialog(QtWidgets.QDialog):
+    """弹出式连接对话框 — 填写服务器信息后点击连接。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("新建连接")
+        self.setMinimumWidth(380)
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QGridLayout()
+
+        r = 0
+        form.addWidget(QtWidgets.QLabel("服务器 IP"), r, 0)
+        self.ip_edit = QtWidgets.QLineEdit()
+        self.ip_edit.setPlaceholderText("例: 192.168.1.100")
+        form.addWidget(self.ip_edit, r, 1)
+
+        r += 1
+        form.addWidget(QtWidgets.QLabel("端口"), r, 0)
+        self.port_edit = QtWidgets.QLineEdit("22")
+        form.addWidget(self.port_edit, r, 1)
+
+        r += 1
+        form.addWidget(QtWidgets.QLabel("用户名"), r, 0)
+        self.user_edit = QtWidgets.QLineEdit("root")
+        form.addWidget(self.user_edit, r, 1)
+
+        r += 1
+        form.addWidget(QtWidgets.QLabel("密码"), r, 0)
+        self.pass_edit = QtWidgets.QLineEdit()
+        self.pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        form.addWidget(self.pass_edit, r, 1)
+
+        r += 1
+        form.addWidget(QtWidgets.QLabel("密钥文件"), r, 0)
+        kr = QtWidgets.QHBoxLayout()
+        self.key_edit = QtWidgets.QLineEdit()
+        self.key_edit.setPlaceholderText("可选，如 ~/.ssh/id_rsa")
+        btn_browse = QtWidgets.QPushButton("浏览")
+        btn_browse.setFixedWidth(50)
+        btn_browse.clicked.connect(self._browse_key)
+        kr.addWidget(self.key_edit)
+        kr.addWidget(btn_browse)
+        form.addLayout(kr, r, 1)
+
+        layout.addLayout(form)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_ok = QtWidgets.QPushButton("连接")
+        self.btn_cancel = QtWidgets.QPushButton("取消")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_ok)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self._apply_style()
+
+    def _browse_key(self):
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择 SSH 密钥文件", str(Path.home() / ".ssh"), "All Files (*)")
+        if p:
+            self.key_edit.setText(p)
+
+    def _apply_style(self):
+        d = DRACULA
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {d['bg']}; color: {d['fg']}; }}
+            QLabel {{ background-color: transparent; color: {d['fg']}; }}
+            QLineEdit {{
+                background-color: {d['bg_darker']}; border: 1px solid {d['selection']};
+                border-radius: 4px; padding: 5px 8px; color: {d['fg']};
+                selection-background-color: {d['selection']};
+            }}
+            QLineEdit:focus {{ border-color: {d['purple']}; }}
+            QPushButton {{
+                background-color: {d['comment']}; color: {d['fg']};
+                border-radius: 4px; padding: 6px 16px; border: none;
+            }}
+            QPushButton:hover {{ background-color: #7082b6; }}
+        """)
+
+    def get_info(self) -> dict:
+        return {
+            "host": self.ip_edit.text().strip(),
+            "port": self.port_edit.text().strip(),
+            "username": self.user_edit.text().strip(),
+            "password": self.pass_edit.text(),
+            "key_path": self.key_edit.text().strip() or None,
+        }
+
+    def prefill(self, host="", port="22", username="root", password="", key_path=""):
+        self.ip_edit.setText(host)
+        self.port_edit.setText(str(port))
+        self.user_edit.setText(username)
+        self.pass_edit.setText(password)
+        if key_path:
+            self.key_edit.setText(key_path)
+
+
 # ====================== 菜单样式 ======================
 
 _MENU_STYLE = f"""
@@ -177,38 +281,29 @@ class MainWindow(QtWidgets.QMainWindow):
         sp_main.setStretchFactor(1, 1)
 
     def _build_conn(self, pl):
-        g = QtWidgets.QGroupBox("连接信息")
-        gl = QtWidgets.QGridLayout(g)
-        r = 0
-        gl.addWidget(QtWidgets.QLabel("服务器 IP"), r, 0)
-        self.ip_edit = QtWidgets.QLineEdit(); self.ip_edit.setPlaceholderText("例: 192.168.1.100")
-        gl.addWidget(self.ip_edit, r, 1)
-        r += 1; gl.addWidget(QtWidgets.QLabel("端口"), r, 0)
-        self.port_edit = QtWidgets.QLineEdit("22"); gl.addWidget(self.port_edit, r, 1)
-        r += 1; gl.addWidget(QtWidgets.QLabel("用户名"), r, 0)
-        self.user_edit = QtWidgets.QLineEdit("root"); gl.addWidget(self.user_edit, r, 1)
-        r += 1; gl.addWidget(QtWidgets.QLabel("密码"), r, 0)
-        self.pass_edit = QtWidgets.QLineEdit(); self.pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        gl.addWidget(self.pass_edit, r, 1)
-        r += 1; gl.addWidget(QtWidgets.QLabel("密钥文件"), r, 0)
-        kr = QtWidgets.QHBoxLayout()
-        self.key_edit = QtWidgets.QLineEdit(); self.key_edit.setPlaceholderText("可选")
-        bk = QtWidgets.QPushButton("浏览"); bk.setFixedWidth(50); bk.clicked.connect(self._browse_key)
-        kr.addWidget(self.key_edit); kr.addWidget(bk)
-        gl.addLayout(kr, r, 1)
-        r += 1; br = QtWidgets.QHBoxLayout()
-        self.btn_connect = QtWidgets.QPushButton("连接 (新标签)")
-        self.btn_disconnect = QtWidgets.QPushButton("断开当前"); self.btn_disconnect.setEnabled(False)
-        self.btn_connect.clicked.connect(self.on_connect)
+        g = QtWidgets.QGroupBox("连接")
+        gl = QtWidgets.QVBoxLayout(g)
+
+        br = QtWidgets.QHBoxLayout()
+        self.btn_connect = QtWidgets.QPushButton("新建连接")
+        self.btn_disconnect = QtWidgets.QPushButton("断开当前")
+        self.btn_disconnect.setEnabled(False)
+        self.btn_connect.clicked.connect(self._show_connect_dialog)
         self.btn_disconnect.clicked.connect(self.on_disconnect)
-        br.addWidget(self.btn_connect); br.addWidget(self.btn_disconnect)
-        gl.addLayout(br, r, 0, 1, 2)
-        r += 1; sr = QtWidgets.QHBoxLayout()
-        self.status_dot = QtWidgets.QLabel(); self.status_dot.setFixedSize(12, 12)
+        br.addWidget(self.btn_connect)
+        br.addWidget(self.btn_disconnect)
+        gl.addLayout(br)
+
+        sr = QtWidgets.QHBoxLayout()
+        self.status_dot = QtWidgets.QLabel()
+        self.status_dot.setFixedSize(12, 12)
         self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
         self.status_label = QtWidgets.QLabel("未连接")
-        sr.addWidget(self.status_dot); sr.addWidget(self.status_label); sr.addStretch(1)
-        gl.addLayout(sr, r, 0, 1, 2)
+        sr.addWidget(self.status_dot)
+        sr.addWidget(self.status_label)
+        sr.addStretch(1)
+        gl.addLayout(sr)
+
         pl.addWidget(g)
 
     def _build_tree(self, pl):
@@ -389,11 +484,12 @@ class MainWindow(QtWidgets.QMainWindow):
         data = item.data(0, QtCore.Qt.UserRole)
         if not data:
             return
-        self.ip_edit.setText(data.get("host", ""))
-        self.port_edit.setText(str(data.get("port", 22)))
-        self.user_edit.setText(data.get("username", ""))
-        self.pass_edit.setText(decrypt_password(data.get("password_enc", "")))
-        self.on_connect()
+        self._do_connect(
+            host=data.get("host", ""),
+            port=data.get("port", 22),
+            username=data.get("username", ""),
+            password=decrypt_password(data.get("password_enc", "")),
+        )
 
     def _add_group(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "新建分组", "分组名称:")
@@ -420,41 +516,38 @@ class MainWindow(QtWidgets.QMainWindow):
             if idx >= 0:
                 self.session_tree.takeTopLevelItem(idx)
 
-    def _browse_key(self):
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 SSH 密钥文件", str(Path.home() / ".ssh"), "All Files (*)")
-        if p:
-            self.key_edit.setText(p)
-
     # ==================== 多标签连接 ====================
 
-    def on_connect(self):
-        host = self.ip_edit.text().strip()
-        port_s = self.port_edit.text().strip()
-        user = self.user_edit.text().strip()
-        pw = self.pass_edit.text()
-        kp = self.key_edit.text().strip() or None
+    def _show_connect_dialog(self):
+        dlg = ConnectDialog(self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        info = dlg.get_info()
+        self._do_connect(**info)
+
+    def _do_connect(self, host, port, username, password, key_path=None):
         if not host:
             QtWidgets.QMessageBox.warning(self, "提示", "请输入服务器 IP"); return
-        if not user:
+        if not username:
             QtWidgets.QMessageBox.warning(self, "提示", "请输入用户名"); return
         try:
-            port = int(port_s)
-        except ValueError:
+            port = int(port)
+        except (ValueError, TypeError):
             port = 22
 
         self.btn_connect.setEnabled(False)
         self.log(f"正在连接 {host}:{port} ...")
 
         sess = Session(self)
-        tab_idx = self.tab_widget.addTab(sess.terminal, f"{user}@{host}")
+        tab_idx = self.tab_widget.addTab(sess.terminal, f"{username}@{host}")
         self._sessions[tab_idx] = sess
         self.tab_widget.setCurrentIndex(tab_idx)
 
-        sess.connected.connect(lambda s=sess, h=host, p=port, u=user, pw_=pw: self._sess_ok(s, h, p, u, pw_))
+        sess.connected.connect(lambda s=sess, h=host, p=port, u=username, pw_=password: self._sess_ok(s, h, p, u, pw_))
         sess.disconnected.connect(lambda s=sess: self._sess_disc(s))
         sess.connect_failed.connect(lambda m: self._sess_fail(m))
         sess.log_message.connect(self.log)
-        sess.connect(host, port, user, pw, kp)
+        sess.connect(host, port, username, password, key_path)
 
     def _sess_ok(self, sess, host, port, user, pw):
         self.btn_connect.setEnabled(True)
