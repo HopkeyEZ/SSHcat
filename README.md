@@ -6,6 +6,12 @@
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green?logo=qt)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
+## 资源占用
+
+> SSHcat 仅占用 **0.7% CPU** 和 **140 MB 内存**，低于浏览器和系统资源管理器。
+
+![资源占用对比](screenshots/resource_usage.png)
+
 ## 功能特性
 
 - **完整终端仿真** — 基于 pyte 的 VT100/xterm 兼容终端，支持 256 色、粗体/斜体/下划线

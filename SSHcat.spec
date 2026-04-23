@@ -3,7 +3,11 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('icon.ico', '.')]
 binaries = []
-hiddenimports = ['paramiko', 'pyte', 'pyte.screens', 'pyte.streams', 'cffi', 'nacl', 'bcrypt']
+hiddenimports = ['paramiko', 'pyte', 'pyte.screens', 'pyte.streams', 'cffi', 'nacl', 'bcrypt',
+                 'cryptography', 'cryptography.fernet', 'cryptography.hazmat.primitives',
+                 'cryptography.hazmat.primitives.hashes', 'cryptography.hazmat.primitives.kdf.pbkdf2',
+                 'sshcat', 'sshcat.theme', 'sshcat.ssh_manager', 'sshcat.threads',
+                 'sshcat.terminal_widget', 'sshcat.main_window', 'sshcat.crypto']
 tmp_ret = collect_all('paramiko')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pyte')
@@ -11,7 +15,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['ssh_terminal.py'],
+    ['run.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
