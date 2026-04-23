@@ -602,6 +602,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_panels()
 
     def _on_tab_changed(self, index):
+        # 清除面板缓存，切换后立即显示新标签的数据
+        self._last_cwd = None
+        self._last_fns = None
         sess = self._sessions.get(index)
         if sess and sess.is_connected:
             self.status_dot.setStyleSheet("border-radius:6px;background:#50fa7b;")
@@ -611,6 +614,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status_dot.setStyleSheet("border-radius:6px;background:#ff5555;")
             self.status_label.setText("未连接" if not sess else "已断开")
             self.btn_disconnect.setEnabled(False)
+            self._reset_panels()
 
     def _reset_panels(self):
         self.dir_path_label.setText("—"); self.file_list.clear()
@@ -621,6 +625,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str, list)
     def _update_dir(self, cwd, fns):
+        # 只接受当前活动标签页的面板更新
+        sender = self.sender()
+        cur = self._current_session()
+        if cur and cur.panel_thread is not sender:
+            return
         nn = []
         if cwd and cwd != "/":
             nn.append("../")
@@ -652,6 +661,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(float, float, float, str)
     def _update_sys(self, cpu, mem, disk, up):
+        sender = self.sender()
+        cur = self._current_session()
+        if cur and cur.panel_thread is not sender:
+            return
         self.cpu_bar.setValue(int(cpu)); self.mem_bar.setValue(int(mem)); self.disk_bar.setValue(int(disk))
         self.uptime_label.setText(f"运行时间: {up}" if up else "运行时间: —")
 

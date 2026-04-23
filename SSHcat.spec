@@ -7,7 +7,8 @@ hiddenimports = ['paramiko', 'pyte', 'pyte.screens', 'pyte.streams', 'cffi', 'na
                  'cryptography', 'cryptography.fernet', 'cryptography.hazmat.primitives',
                  'cryptography.hazmat.primitives.hashes', 'cryptography.hazmat.primitives.kdf.pbkdf2',
                  'sshcat', 'sshcat.theme', 'sshcat.ssh_manager', 'sshcat.threads',
-                 'sshcat.terminal_widget', 'sshcat.main_window', 'sshcat.crypto']
+                 'sshcat.terminal_widget', 'sshcat.main_window', 'sshcat.crypto',
+                 'sshcat.session', 'sshcat.sftp_manager', 'sshcat.editor_widget', 'sshcat.tunnel']
 tmp_ret = collect_all('paramiko')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pyte')
