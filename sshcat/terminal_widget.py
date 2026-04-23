@@ -15,12 +15,14 @@ class TerminalWidget(QtWidgets.QWidget):
     """高性能终端控件 — 脏区渲染 + 颜色缓存 + 异步输入 + 回滚缓冲"""
 
     _SCROLLBACK_MAX = 5000  # 最大回滚行数
+    files_dropped = QtCore.Signal(list)  # 拖拽文件到终端时发射
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setAttribute(QtCore.Qt.WA_InputMethodEnabled, True)
         self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
+        self.setAcceptDrops(True)
 
         # 字体 + 预构建变体
         self._font = QtGui.QFont()
@@ -580,6 +582,29 @@ class TerminalWidget(QtWidgets.QWidget):
         if commit and self._channel:
             self._send_data(commit.encode("utf-8"))
         event.accept()
+
+    # ---- 拖拽上传 ----
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        import os
+        if not event.mimeData().hasUrls():
+            return
+        files = [u.toLocalFile() for u in event.mimeData().urls()
+                 if u.isLocalFile() and os.path.isfile(u.toLocalFile())]
+        if files:
+            self.files_dropped.emit(files)
 
     def sizeHint(self):
         return QtCore.QSize(self._cols * self._char_w, self._rows * self._char_h)
