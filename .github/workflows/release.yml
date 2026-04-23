@@ -1,0 +1,124 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.1)'
+        required: true
+        default: '1.0.1'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --name SSHcat --icon icon.ico --windowed --add-data "icon.ico;." run.py
+      - name: Create zip
+        run: Compress-Archive -Path dist\SSHcat\* -DestinationPath SSHcat-${{ github.event.inputs.version }}-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: SSHcat-${{ github.event.inputs.version }}-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --name SSHcat --icon icon.png --windowed --add-data "icon.png:." run.py
+      - name: Create tar.gz
+        run: |
+          cd dist
+          tar czf ../SSHcat-${{ github.event.inputs.version }}-linux-x64.tar.gz SSHcat/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: SSHcat-${{ github.event.inputs.version }}-linux-x64.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --name SSHcat --icon icon.png --windowed --add-data "icon.png:." run.py
+      - name: Create zip
+        run: |
+          cd dist
+          zip -r ../SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip SSHcat/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip
+
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: List files
+        run: ls -la
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: SSHcat v${{ github.event.inputs.version }}
+          body: |
+            ## SSHcat v${{ github.event.inputs.version }} — 高性能 SSH 终端管理器
+
+            ### 下载
+            | 平台 | 文件 |
+            |------|------|
+            | **Windows x64** | `SSHcat-${{ github.event.inputs.version }}-windows-x64.zip` |
+            | **Linux x64** | `SSHcat-${{ github.event.inputs.version }}-linux-x64.tar.gz` |
+            | **macOS ARM64** | `SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip` |
+
+            ### 安装
+            - **Windows**: 解压后运行 `SSHcat.exe`，或下载之前的安装向导版本
+            - **Linux**: `tar xzf SSHcat-*.tar.gz && cd SSHcat && ./SSHcat`
+            - **macOS**: 解压后运行 `SSHcat`
+
+            ### 功能
+            - 多标签终端：同时连接多台服务器
+            - SFTP 文件传输：上传/下载 + 拖拽上传
+            - 内置编辑器：远程文件编辑
+            - 会话分组管理：树形分组
+            - 端口转发：本地隧道
+            - Dracula 暗色主题
+          files: |
+            SSHcat-${{ github.event.inputs.version }}-windows-x64.zip
+            SSHcat-${{ github.event.inputs.version }}-linux-x64.tar.gz
+            SSHcat-${{ github.event.inputs.version }}-macos-arm64.zip

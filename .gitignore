@@ -8,3 +8,5 @@ dist/
 .sshcat_history.json
 SSHcat.spec
 build_gui.bat
+installer.iss
+installer_output/
