@@ -1,6 +1,6 @@
 # SSHcat 🐱
 
-**高性能 SSH 终端管理器** — Dracula 暗色主题 · 高性能终端仿真 · 服务器监控面板
+**高性能 SSH 终端管理器**
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green?logo=qt)
