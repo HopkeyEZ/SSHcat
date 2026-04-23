@@ -16,6 +16,7 @@ from .theme import DRACULA
 from .ssh_manager import SshManager, SshExecHelper
 from .threads import SshReaderThread, PanelRefreshThread
 from .terminal_widget import TerminalWidget
+from .crypto import encrypt_password, decrypt_password
 
 
 # ====================== 连接历史 ======================
@@ -43,10 +44,11 @@ def save_history(entries: list):
         pass
 
 
-def add_history_entry(host, port, username):
-    """添加一条连接记录（去重，最新在前）"""
+def add_history_entry(host, port, username, password=""):
+    """添加一条连接记录（去重，最新在前，密码加密存储）"""
     entries = load_history()
-    entry = {"host": host, "port": int(port), "username": username}
+    entry = {"host": host, "port": int(port), "username": username,
+             "password_enc": encrypt_password(password)}
     # 去重
     entries = [e for e in entries if not (e.get("host") == host and e.get("port") == int(port) and e.get("username") == username)]
     entries.insert(0, entry)
@@ -478,6 +480,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ip_edit.setText(data.get("host", ""))
             self.port_edit.setText(str(data.get("port", 22)))
             self.user_edit.setText(data.get("username", ""))
+            self.pass_edit.setText(decrypt_password(data.get("password_enc", "")))
+            # 自动连接
+            if self.btn_connect.isEnabled():
+                self.on_connect()
 
     def _browse_key_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -535,7 +541,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._panel_thread.start()
 
                 # 保存到历史
-                add_history_entry(host, port, username)
+                add_history_entry(host, port, username, password)
 
                 QtCore.QMetaObject.invokeMethod(self, "_on_connected",
                                                  QtCore.Qt.QueuedConnection)
